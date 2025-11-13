@@ -54,6 +54,7 @@ import autoTable from "jspdf-autotable";
 // --- Definição dos Tipos (Usando o que já existe) ---
 type Sale = Database["public"]["Tables"]["sales"]["Row"];
 type Movement = Database["public"]["Tables"]["movements"]["Row"];
+type Caixa = Database["public"]["Tables"]["caixas"]["Row"]; // TIPO ADICIONADO
 type SaleItem = Database["public"]["Tables"]["sale_items"]["Row"] & {
   products: { nome: string } | null;
 };
@@ -69,7 +70,7 @@ const paymentMethodLabels: Record<PaymentMethod, string> = {
 };
 
 // --- MODAL DE MOVIMENTAÇÃO (EXPORTADO) ---
-// (Usado pelo CaixaRapido.tsx para "Abrir Caixa")
+// (Usado para Sangria/Suprimento extra)
 interface MovementsModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -82,7 +83,6 @@ export function MovementsModal({ isOpen, onClose, onMovementRegistered }: Moveme
   const [descricao, setDescricao] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // --- FUNÇÃO ATUALIZADA ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !tipo || !valor) {
@@ -91,54 +91,24 @@ export function MovementsModal({ isOpen, onClose, onMovementRegistered }: Moveme
     }
 
     setLoading(true);
+    const { error } = await supabase.from("movements").insert({
+      tipo: tipo,
+      valor: parseFloat(valor),
+      descricao: descricao || (tipo === 'entrada' ? 'Suprimento' : 'Sangria'),
+      responsavel_id: user.id,
+    });
 
-    // 1. Insere o movimento (como já faz)
-    const { data: movementData, error: movementError } = await supabase
-      .from("movements")
-      .insert({
-        tipo: tipo,
-        valor: parseFloat(valor),
-        descricao: descricao || (tipo === 'entrada' ? 'Abertura de Caixa' : 'Fechamento de Caixa'),
-        responsavel_id: user.id,
-      })
-      .select()
-      .single();
-
-    if (movementError) {
-      setLoading(false);
-      toast.error("Erro ao registrar movimento", { description: movementError.message });
-      return; // Para aqui se o primeiro passo falhar
-    }
-
-    // 2. Lógica ADICIONAL: Se for uma "entrada" (Abertura), insere também na tabela 'caixas'
-    if (tipo === 'entrada') {
-      const { error: caixaError } = await supabase.from('caixas').insert({
-        colaborador_id: user.id,
-        status: 'aberto',
-        valor_abertura: parseFloat(valor),
-        // Opcional: associa o movimento de abertura ao caixa
-        // movement_id_abertura: movementData.id 
-      });
-
-      if (caixaError) {
-        // Se isso falhar, o movimento foi registrado, mas o caixa não.
-        // Reverte o movimento para evitar inconsistência
-        await supabase.from('movements').delete().eq('id', movementData.id);
-        
-        toast.error("Falha ao abrir o 'caixa' (tabela caixas). Movimento revertido.", { description: caixaError.message });
-        setLoading(false);
-        return;
-      }
-    }
-    
-    // 3. Sucesso (Se chegou aqui, tudo deu certo)
     setLoading(false);
-    toast.success(tipo === 'entrada' ? "Caixa aberto com sucesso!" : "Movimento registrado!");
-    onMovementRegistered(); 
-    onClose();
-    setTipo("");
-    setValor("");
-    setDescricao("");
+    if (error) {
+      toast.error("Erro ao registrar movimento", { description: error.message });
+    } else {
+      toast.success("Movimento registrado com sucesso!");
+      onMovementRegistered(); 
+      onClose();
+      setTipo("");
+      setValor("");
+      setDescricao("");
+    }
   };
 
   return (
@@ -155,8 +125,8 @@ export function MovementsModal({ isOpen, onClose, onMovementRegistered }: Moveme
                 <SelectValue placeholder="Selecione o tipo..." />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="entrada">Entrada (Abertura)</SelectItem>
-                <SelectItem value="saida">Saída (Fechamento/Sangria)</SelectItem>
+                <SelectItem value="entrada">Entrada (Suprimento)</SelectItem>
+                <SelectItem value="saida">Saída (Sangria)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -177,7 +147,7 @@ export function MovementsModal({ isOpen, onClose, onMovementRegistered }: Moveme
               id="descricao"
               value={descricao}
               onChange={(e) => setDescricao(e.target.value)}
-              placeholder="Ex: Abertura, Sangria, etc."
+              placeholder="Ex: Suprimento, Sangria, etc."
             />
           </div>
           <DialogFooter>
@@ -202,79 +172,56 @@ export default function CollaboratorHistory() {
   const [sales, setSales] = useState<Sale[]>([]);
   const [movements, setMovements] = useState<Movement[]>([]); 
   
-  // Guarda a data/hora da última abertura de caixa
-  const [dataAbertura, setDataAbertura] = useState<string | null>(null);
+  // Guarda o REGISTRO INTEIRO do caixa aberto
+  const [caixaAberto, setCaixaAberto] = useState<Caixa | null>(null);
 
   const [isCloseCaixaAlertOpen, setIsCloseCaixaAlertOpen] = useState(false);
 
+  // Função de verificação
+  const checkCaixaAberto = async () => {
+    if (!user) return;
+    setLoading(true);
+
+    // 1. Encontra o caixa ATIVO na tabela 'caixas'
+    // Esta chamada falha com 406 se a POLÍTICA DE SELECT não existir
+    const { data: caixaData, error: caixaError } = await supabase
+      .from('caixas')
+      .select('*')
+      .eq('colaborador_id', user.id)
+      .eq('status', 'aberto')
+      .single();
+
+    if (caixaError && caixaError.code !== 'PGRST116') { // PGRST116 = no rows found
+      toast.error("Erro ao verificar status do caixa", { description: caixaError.message });
+      setLoading(false);
+      return;
+    }
+
+    if (caixaData) {
+      // Caixa está aberto
+      setCaixaAberto(caixaData as Caixa);
+      const dataInicio = caixaData.data_abertura; // Usa a data_abertura correta
+      loadSales(dataInicio);
+      loadMovements(dataInicio);
+    } else {
+      // Caixa está fechado
+      setLoading(false);
+      setCaixaAberto(null);
+      setSales([]);
+      setMovements([]);
+    }
+  };
+  
   useEffect(() => {
     if (user) {
       checkCaixaAberto();
     }
   }, [user]);
 
-  // Função para verificar o estado do caixa (aberto ou fechado)
-  const checkCaixaAberto = async () => {
-    if (!user) return;
-    setLoading(true);
-
-    const hoje = new Date().toISOString().split('T')[0];
-    const inicioDoDia = `${hoje}T00:00:00Z`;
-
-    // 1. Encontra a última ABERTURA (entrada) do dia
-    // (Lógica original baseada em 'movements' mantida para consistência interna da página)
-    const { data: lastEntradaData } = await supabase
-      .from('movements')
-      .select('created_at')
-      .eq('responsavel_id', user.id)
-      .eq('tipo', 'entrada')
-      .gte('created_at', inicioDoDia)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (!lastEntradaData) {
-      // Nenhuma abertura de caixa hoje
-      setLoading(false);
-      setDataAbertura(null);
-      setSales([]);
-      setMovements([]);
-      return;
-    }
-
-    // 2. Encontra o último FECHAMENTO (saida) do dia
-    const { data: lastSaidaData } = await supabase
-      .from('movements')
-      .select('created_at')
-      .eq('responsavel_id', user.id)
-      .eq('tipo', 'saida')
-      .gte('created_at', inicioDoDia)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    // 3. Compara
-    const isAberto = lastEntradaData && 
-                     (!lastSaidaData || new Date(lastEntradaData.created_at) > new Date(lastSaidaData.created_at));
-
-    if (isAberto) {
-      const dataInicio = lastEntradaData.created_at;
-      setDataAbertura(dataInicio);
-      loadSales(dataInicio);
-      loadMovements(dataInicio);
-    } else {
-      // O caixa está fechado
-      setLoading(false);
-      setDataAbertura(null);
-      setSales([]);
-      setMovements([]);
-    }
-  };
-
   // Carrega vendas desde a data de abertura
   const loadSales = async (dataInicio: string) => {
     if (!user) return;
-    setLoading(true);
+    // Não seta loading aqui, pois o checkCaixaAberto já setou
     const { data, error } = await supabase
       .from('sales')
       .select('*')
@@ -285,13 +232,13 @@ export default function CollaboratorHistory() {
     
     if (data) setSales(data);
     if (error) toast.error("Erro ao carregar vendas", { description: error.message });
-    setLoading(false);
+    setLoading(false); // Seta loading false aqui
   };
 
   // Carrega movimentos desde a data de abertura
   const loadMovements = async (dataInicio: string) => {
     if (!user) return;
-    setLoading(true);
+    // Não seta loading aqui, pois o checkCaixaAberto já setou
     const { data, error } = await supabase
       .from('movements')
       .select('*')
@@ -301,10 +248,10 @@ export default function CollaboratorHistory() {
     
     if (data) setMovements(data);
     if (error) toast.error("Erro ao carregar movimentos", { description: error.message });
-    setLoading(false);
+    // Não seta loading aqui, pois loadSales já o fará
   };
 
-  // --- CÁLCULOS PARA O RESUMO ---
+  // --- CÁLCULOS PARA O RESUMO (Sem alteração) ---
   const { totalVendas, totalEntradas, totalSaidas } = useMemo(() => {
     const totalVendas = sales.reduce((acc, sale) => acc + (Number(sale.total) || 0), 0);
     
@@ -323,7 +270,7 @@ export default function CollaboratorHistory() {
 
   // --- LÓGICA DE GERAÇÃO DE PDF (Sem alteração) ---
   const generatePDF = () => {
-    if (!dataAbertura) return;
+    if (!caixaAberto) return; 
 
     const doc = new jsPDF();
     const today = format(new Date(), "dd/MM/yyyy HH:mm", { locale: ptBR });
@@ -332,7 +279,7 @@ export default function CollaboratorHistory() {
     doc.setFontSize(10);
     doc.text(`Gerado em: ${today}`, 14, 22);
     doc.text(`Colaborador: ${userName || user?.email}`, 14, 28);
-    doc.text(`Período de: ${format(new Date(dataAbertura), "dd/MM/yy HH:mm")}`, 14, 34);
+    doc.text(`Período de: ${format(new Date(caixaAberto.data_abertura), "dd/MM/yy HH:mm")}`, 14, 34); 
 
     // 1. Tabela de Vendas
     let totalVendasCalc = 0;
@@ -350,9 +297,9 @@ export default function CollaboratorHistory() {
     doc.text("Vendas Finalizadas", 14, 46);
     autoTable(doc, {
       startY: 48,
-      head: [['Data', 'Pagamento', 'Total']],
+      head: [['Data', 'Pagamento', 'Total']], 
       body: salesBody,
-      foot: [['Total de Vendas', '', `R$ ${totalVendasCalc.toFixed(2)}`]],
+      foot: [['Total de Vendas', '', `R$ ${totalVendasCalc.toFixed(2)}`]], 
       theme: 'striped',
       headStyles: { fillColor: [38, 38, 38] },
     });
@@ -411,14 +358,13 @@ export default function CollaboratorHistory() {
     toast.success("Relatório gerado!");
   };
   
-  // --- FUNÇÃO ATUALIZADA ---
+  // --- Ação de Fechar o Caixa (MODIFICADA) ---
   const handleConfirmCloseCaixa = async () => {
-    if (!user || !dataAbertura) return; // Verificação de segurança
+    if (!user || !caixaAberto) return; // Usa o novo state
 
-    // Calcula o valor final em caixa (Dinheiro das vendas + Entradas - Saídas)
     const valorFechamento = totalVendas + totalEntradas - totalSaidas;
 
-    // 1. Cria o movimento de SAÍDA (como já faz)
+    // ETAPA 1: Cria o movimento de SAÍDA (para o histórico)
     const { error: movementError } = await supabase
       .from('movements')
       .insert({
@@ -430,30 +376,29 @@ export default function CollaboratorHistory() {
     
     if (movementError) {
       toast.error("Erro ao registrar movimento de fechamento", { description: movementError.message });
-      return; // Para se não conseguir registrar o movimento
+      return; // Não continua se o movimento falhar
     }
 
-    // 2. Lógica ADICIONAL: Atualiza o 'caixa' para 'fechado'
-    //    Encontra o último caixa aberto por este colaborador desde a abertura
+    // ETAPA 2: Atualiza o STATUS na tabela 'caixas'
+    // Esta chamada falha se a POLÍTICA DE UPDATE não existir
     const { error: caixaError } = await supabase
       .from('caixas')
-      .update({ 
+      .update({
         status: 'fechado',
-        valor_fechamento: valorFechamento // (Opcional: se você tiver esta coluna)
+        valor_fechamento: valorFechamento,
+        data_fechamento: new Date().toISOString() // Seta a data de fechamento
       })
-      .eq('colaborador_id', user.id)
-      .eq('status', 'aberto')
-      .gte('created_at', dataAbertura); // Garante que estamos fechando o caixa correto
+      .eq('id', caixaAberto.id); // Usa o ID do caixa que estava aberto
     
     if (caixaError) {
-      toast.error("Movimento registrado, mas erro ao atualizar o 'caixa' para fechado.", { description: caixaError.message });
-      // Não reverte, mas avisa o usuário que requer atenção manual.
+      toast.error("Erro ao fechar o caixa (status) (RLS?)", { 
+        description: caixaError.message 
+      });
     } else {
       toast.success("Caixa fechado com sucesso!");
+      setIsCloseCaixaAlertOpen(false); // Fecha o alerta
+      checkCaixaAberto(); // Re-executa a verificação, que vai limpar a tela
     }
-    
-    setIsCloseCaixaAlertOpen(false); // Fecha o alerta
-    checkCaixaAberto(); // Re-executa a verificação, que vai limpar a tela
   };
 
   // --- Renderização ---
@@ -465,8 +410,8 @@ export default function CollaboratorHistory() {
     );
   }
 
-  // Se o caixa ESTIVER FECHADO (dataAbertura é null)
-  if (!dataAbertura) {
+  // Se o caixa ESTIVER FECHADO (caixaAberto é null)
+  if (!caixaAberto) {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold tracking-tight">Caixa Fechado</h1>
@@ -476,7 +421,7 @@ export default function CollaboratorHistory() {
           </CardHeader>
           <CardContent>
             <p className="text-muted-foreground">
-              Vá para a tela de **Caixa Rápido** para registrar uma "Abertura de Caixa" (movimento de entrada) e começar o dia.
+              Vá para a tela de **Caixa Rápido** para registrar uma "Abertura de Caixa" e começar o dia.
             </p>
           </CardContent>
         </Card>
@@ -492,7 +437,7 @@ export default function CollaboratorHistory() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Meu Caixa do Dia</h1>
             <p className="text-muted-foreground">
-              Caixa aberto às {format(new Date(dataAbertura), "dd/MM/yy HH:mm")}
+              Caixa aberto às {format(new Date(caixaAberto.data_abertura), "dd/MM/yy HH:mm")}
             </p>
           </div>
           
