@@ -115,7 +115,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (profile.tipo === 'admin') {
             navigate("/admin"); // Rota de Admin
           } else if (profile.tipo === 'colaborador') {
-            navigate("/pdv"); // Rota de Colaborador
+            navigate("/pdv/caixa-rapido"); // Rota de Colaborador
           } else {
             navigate("/"); // Rota padrão
           }

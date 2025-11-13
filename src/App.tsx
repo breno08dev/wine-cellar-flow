@@ -28,6 +28,9 @@ const PDV = lazy(() => import("./pages/pdv/PDV"));
 const CollaboratorHistory = lazy(() => import("./pages/pdv/History"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
+// --- IMPORTAÇÃO DA NOVA PÁGINA ---
+const CaixaRapido = lazy(() => import("./pages/pdv/Caixa-Rapido"));
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
@@ -89,6 +92,18 @@ const App = () => (
                   <ProtectedRoute requiredType="colaborador">
                     <DashboardLayout>
                       <CollaboratorHistory />
+                    </DashboardLayout>
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* --- ROTA ADICIONADA --- */}
+              <Route
+                path="/pdv/caixa-rapido"
+                element={
+                  <ProtectedRoute requiredType="colaborador">
+                    <DashboardLayout>
+                      <CaixaRapido />
                     </DashboardLayout>
                   </ProtectedRoute>
                 }

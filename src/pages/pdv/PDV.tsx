@@ -337,7 +337,7 @@ export default function PDV() {
     <>
       <div className="space-y-6">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">PDV - Ponto de Venda</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Sistema de Comandas</h1>
           <p className="text-muted-foreground">Gerencie suas comandas</p>
         </div>
 

@@ -1,4 +1,11 @@
-import { LayoutDashboard, Package, ShoppingCart, History, LogOut } from "lucide-react";
+import {
+  LayoutDashboard,
+  Package,
+  ShoppingCart,
+  History,
+  LogOut,
+  Zap, // 1. IMPORTAR O ÍCONE (Zap para "rápido")
+} from "lucide-react";
 import { NavLink } from "react-router-dom";
 import {
   Sidebar,
@@ -23,8 +30,10 @@ const adminItems = [
   { title: "Vendas", url: "/admin/vendas", icon: History },
 ];
 
+// 2. ADICIONAR O NOVO ITEM DE MENU
 const colaboradorItems = [
-  { title: "PDV", url: "/pdv", icon: ShoppingCart },
+  { title: "Caixa Rápido", url: "/pdv/caixa-rapido", icon: Zap },
+  { title: "Comandas", url: "/pdv", icon: ShoppingCart },
   { title: "Histórico", url: "/pdv/historico", icon: History },
 ];
 
@@ -44,7 +53,7 @@ export function AppSidebar() {
   return (
     <Sidebar
       collapsible="icon"
-      // 🔧 Fundo sólido no mobile, transparente no desktop
+      // Fundo sólido no mobile, transparente no desktop
       className="bg-white dark:bg-gray-900 md:bg-transparent dark:md:bg-transparent"
     >
       {/* Header */}
@@ -55,6 +64,7 @@ export function AppSidebar() {
             alt="Logo da Adega"
             className={`${isCollapsed ? "h-6 w-6" : "h-8 w-8"} object-contain`}
           />
+          {/* O ERRO ESTAVA AQUI, AGORA ESTÁ CORRIGIDO. */}
           {!isCollapsed && (
             <div>
               <h2 className="font-bold text-lg">Adega do Sheik</h2>
@@ -80,7 +90,9 @@ export function AppSidebar() {
                   <SidebarMenuButton asChild>
                     <NavLink
                       to={item.url}
-                      end
+                      // `end` é importante para o NavLink da raiz ("/pdv")
+                      // não ficar ativo em "/pdv/historico" ou "/pdv/caixa-rapido"
+                      end={item.url === "/pdv"}
                       className={({ isActive }) =>
                         isActive
                           ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
