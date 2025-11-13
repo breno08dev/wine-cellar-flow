@@ -12,7 +12,6 @@ import { Plus, Minus, X, Search, ShoppingCart, CreditCard, Landmark, Wallet, Dol
 import { Database } from "@/integrations/supabase/types";
 import { useAuth } from "@/contexts/AuthContext";
 import { Label } from "@/components/ui/label";
-import { MovementsModal } from "@/pages/pdv/History"; 
 
 // --- Definição dos Tipos ---
 type ProductRow = Database["public"]["Tables"]["products"]["Row"];
@@ -24,6 +23,9 @@ type CartItem = Product & {
   quantidade_venda: number;
 };
 type PaymentMethod = Database["public"]["Enums"]["payment_method"];
+
+// NOVO TIPO - Status do Caixa
+type CaixaStatus = "aberto" | "fechado" | "loading";
 
 const paymentMethodLabels: Record<PaymentMethod, string> = {
   dinheiro: "Dinheiro",
@@ -46,13 +48,13 @@ export default function CaixaRapido() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | "">("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // --- LÓGICA DE ABERTURA DE CAIXA (MOVIDA DO HISTORY) ---
+  // --- LÓGICA DE ABERTURA DE CAIXA ---
   const [isCaixaModalOpen, setIsCaixaModalOpen] = useState(false);
+  const [valorAbertura, setValorAbertura] = useState("");
+  const [caixaStatus, setCaixaStatus] = useState<CaixaStatus>("loading");
+  const [isSubmittingCaixa, setIsSubmittingCaixa] = useState(false);
 
-  // --- LÓGICA DE RECIBO REMOVIDA ---
-  // const [receipt, setReceipt] = useState<string | null>(null);
-  // const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
-
+  // Efeito para carregar produtos e categorias
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
@@ -85,6 +87,46 @@ export default function CaixaRapido() {
     };
     loadData();
   }, []); 
+
+  // --- EFEITO: Verificar Status do Caixa (Lendo da tabela 'caixas') ---
+  const checkCaixaStatus = async () => {
+    if (!user) {
+      setCaixaStatus("fechado");
+      return;
+    }
+    
+    setCaixaStatus("loading");
+    try {
+      // Esta chamada falha com 406 se a POLÍTICA DE SELECT não existir
+      const { data, error } = await supabase
+        .from("caixas")
+        .select("id")
+        .eq("colaborador_id", user.id)
+        .eq("status", "aberto")
+        .single();
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 = "no rows found"
+        throw error;
+      }
+      
+      if (data) {
+        setCaixaStatus("aberto");
+      } else {
+        setCaixaStatus("fechado");
+      }
+    } catch (error: any) {
+      console.error("Erro ao verificar status do caixa (RLS?):", error);
+      // Não mostramos toast aqui, pois o erro 406 (sem permissão) é comum
+      // e o usuário não precisa ser notificado toda vez.
+      setCaixaStatus("fechado");
+    }
+  };
+
+  useEffect(() => {
+    // Roda a verificação de status quando o usuário é carregado
+    checkCaixaStatus();
+  }, [user]);
+
 
   const filteredProducts = useMemo(() => {
     return products.filter(p => {
@@ -131,6 +173,12 @@ export default function CaixaRapido() {
     if (!user) return toast.error("Usuário não encontrado. Faça login.");
     if (cart.length === 0) return toast.error("Carrinho vazio.");
     if (!paymentMethod) return toast.error("Escolha um método de pagamento.");
+    
+    if (caixaStatus !== 'aberto') {
+      return toast.error("O caixa está fechado!", {
+        description: "Você precisa abrir o caixa antes de registrar uma venda."
+      });
+    }
 
     setIsSubmitting(true);
 
@@ -167,21 +215,93 @@ export default function CaixaRapido() {
         throw itemsError;
       }
       
-     
-
-      // 5. Sucesso: Limpar tudo
+      // 4. Sucesso: Limpar tudo
       toast.success("Venda finalizada com sucesso!");
       setCart([]);
       setPaymentMethod("");
       setIsPaymentModalOpen(false);
-      setIsSubmitting(false);
-
+      
     } catch (error: any) {
       console.error("Erro ao finalizar venda:", error);
       toast.error("Erro ao finalizar venda", { description: error.message });
-      setIsSubmitting(false);
+    } finally {
+      setIsSubmitting(false); 
     }
   };
+
+  // --- FUNÇÃO DE ABRIR CAIXA (ATUALIZADA) ---
+  // Salva na tabela 'caixas' (para status) E na tabela 'movements' (para o histórico)
+  const handleOpenCaixa = async () => {
+    if (!user) return toast.error("Usuário não encontrado. Faça login.");
+    
+    const valorNum = parseFloat(valorAbertura.replace(",", "."));
+    if (isNaN(valorNum) || valorNum < 0) {
+      return toast.error("Valor de abertura inválido.");
+    }
+
+    if (caixaStatus === 'aberto') {
+      return toast.error("O caixa já está aberto.");
+    }
+
+    setIsSubmittingCaixa(true);
+    try {
+      // --- ETAPA 1: Criar o registro do caixa (para status) ---
+      // Esta chamada falha se a POLÍTICA DE INSERT não existir
+      const { data: caixaData, error: caixaError } = await supabase
+        .from("caixas")
+        .insert({
+          colaborador_id: user.id,
+          valor_abertura: valorNum,
+          status: "aberto"
+          // data_abertura é definida por 'default now()' no banco
+        })
+        .select()
+        .single();
+
+      if (caixaError) {
+        console.error("Erro ao inserir na tabela caixas (RLS?):", caixaError);
+        throw new Error(`Falha ao abrir caixa (status): ${caixaError.message}`);
+      }
+      
+      console.log("Caixa (status) aberto com sucesso:", caixaData);
+
+      // --- ETAPA 2: Criar o movimento (para o histórico) ---
+      // (created_at é automático, mas usamos data_abertura para linkar)
+      const { error: movementError } = await supabase
+        .from("movements")
+        .insert({
+          responsavel_id: user.id,
+          tipo: "entrada", // Tipo 'entrada' = Suprimento
+          descricao: 'Abertura de Caixa', // History.tsx procura por esta string
+          valor: valorNum,
+          // Garante que o movimento tenha o mesmo timestamp do caixa
+          created_at: caixaData.data_abertura 
+        });
+
+      if (movementError) {
+        // Se o movimento falhar, precisamos reverter a abertura do caixa
+        console.error("Erro ao criar movimento no histórico (RLS?):", movementError);
+        await supabase.from("caixas").delete().eq("id", caixaData.id);
+        throw new Error(`Falha ao registrar histórico (movimento): ${movementError.message}`);
+      }
+      
+      console.log("Movimento de abertura registrado no histórico.");
+      
+      toast.success("Caixa aberto com sucesso!");
+      setCaixaStatus("aberto"); // Atualiza o estado local
+      setIsCaixaModalOpen(false); // Fecha o modal
+      setValorAbertura(""); // Limpa o input
+      
+    } catch (error: any) {
+      console.error("Erro ao abrir caixa:", error);
+      toast.error("Erro ao abrir caixa", {
+        description: error.message || "Verifique suas permissões (RLS) ou a conexão."
+      });
+    } finally {
+      setIsSubmittingCaixa(false);
+    }
+  };
+
 
   // --- Renderização da UI ---
   return (
@@ -226,7 +346,7 @@ export default function CaixaRapido() {
               <Button 
                 className="m-3" 
                 onClick={() => addToCart(product)}
-                disabled={product.quantidade <= 0}
+                disabled={product.quantidade <= 0 || caixaStatus !== 'aberto'} // Desabilita se o caixa estiver fechado
               >
                 {product.quantidade <= 0 ? "Esgotado" : "Adicionar"}
               </Button>
@@ -238,17 +358,21 @@ export default function CaixaRapido() {
       {/* Coluna Direita: Carrinho e Resumo */}
       <div className="w-1/2 flex flex-col p-4">
         
-        {/* --- CARD DE ABERTURA DE CAIXA ADICIONADO --- */}
+        {/* --- CARD DE CONTROLE DE CAIXA --- */}
         <Card className="mb-4">
           <CardHeader className="flex flex-row items-center justify-between p-4">
             <CardTitle className="text-lg">Controle de Caixa</CardTitle>
-            <Button onClick={() => setIsCaixaModalOpen(true)}>
+            <Button 
+              onClick={() => setIsCaixaModalOpen(true)}
+              disabled={caixaStatus !== 'fechado'} // Desabilita se o caixa NÃO estiver fechado
+            >
               <DollarSign className="h-4 w-4 mr-2" />
-              Abrir Caixa
+              {caixaStatus === 'loading' ? "Verificando..." : caixaStatus === 'aberto' ? "Caixa Aberto" : "Abrir Caixa"}
             </Button>
           </CardHeader>
         </Card>
 
+        {/* Card de Resumo da Compra */}
         <Card className="flex-1 flex flex-col">
           <CardHeader className="p-4">
             <CardTitle>Resumo da Compra</CardTitle>
@@ -258,6 +382,9 @@ export default function CaixaRapido() {
               <div className="text-center text-muted-foreground py-8">
                 <ShoppingCart className="mx-auto h-12 w-12" />
                 <p className="mt-2">Carrinho vazio</p>
+                {caixaStatus !== 'aberto' && (
+                  <p className="text-sm text-destructive mt-2">Abra o caixa para iniciar as vendas.</p>
+                )}
               </div>
             ) : (
               <Table>
@@ -306,9 +433,9 @@ export default function CaixaRapido() {
             <Button 
               className="w-full h-12 text-lg" 
               onClick={() => setIsPaymentModalOpen(true)}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || isSubmitting || caixaStatus !== 'aberto'} // Desabilita se o caixa estiver fechado
             >
-              Finalizar Venda
+              {caixaStatus !== 'aberto' ? "Caixa Fechado" : "Finalizar Venda"}
             </Button>
           </div>
         </Card>
@@ -328,7 +455,7 @@ export default function CaixaRapido() {
             <Select value={paymentMethod} onValueChange={(v) => setPaymentMethod(v as PaymentMethod)}>
               <SelectTrigger>
                 <SelectValue placeholder="Selecione..." />
-              </SelectTrigger>
+              </SelectTrigger> 
               <SelectContent>
                 <SelectItem value="dinheiro"><Wallet className="inline h-4 w-4 mr-2" />Dinheiro</SelectItem>
                 <SelectItem value="pix"><Landmark className="inline h-4 w-4 mr-2" />Pix</SelectItem>
@@ -347,16 +474,35 @@ export default function CaixaRapido() {
       </Dialog>
 
       {/* --- MODAL DE ABERTURA DE CAIXA --- */}
-      <MovementsModal 
-        isOpen={isCaixaModalOpen} 
-        onClose={() => setIsCaixaModalOpen(false)}
-        // Passando props necessárias, se houver.
-        // Se ele recarrega a lista, passamos uma função vazia 
-        // ou a lógica de recarga de movimentos (se houver)
-        onMovementRegistered={() => {}} 
-      />
-
-     
+      <Dialog open={isCaixaModalOpen} onOpenChange={setIsCaixaModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Abrir Caixa</DialogTitle>
+            <DialogDescription>
+              Insira o valor inicial (suprimento) para abrir o caixa.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <Label htmlFor="valorAbertura">Valor de Abertura (R$)</Label>
+            <Input 
+              id="valorAbertura"
+              type="number"
+              placeholder="0,00"
+              value={valorAbertura}
+              onChange={(e) => setValorAbertura(e.target.value)}
+              disabled={isSubmittingCaixa}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsCaixaModalOpen(false)} disabled={isSubmittingCaixa}>
+              Cancelar
+            </Button>
+            <Button onClick={handleOpenCaixa} disabled={isSubmittingCaixa}>
+              {isSubmittingCaixa ? "Abrindo..." : "Confirmar Abertura"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       
     </div>
   );

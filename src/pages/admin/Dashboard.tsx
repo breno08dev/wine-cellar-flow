@@ -77,9 +77,35 @@ export default function AdminDashboard() {
   const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
   const [paymentData, setPaymentData] = useState<any[]>([]);
 
+  // --- ATUALIZAÇÃO NESTA FUNÇÃO (useEffect) ---
   useEffect(() => {
+    // 1. Carrega os dados iniciais
     loadDashboardData();
-  }, []);
+
+    // 2. Define o que fazer quando um evento (INSERT, UPDATE, DELETE) acontecer
+    const handleCaixaChange = (payload: any) => {
+      // Quando algo mudar na tabela 'caixas', apenas recarrega os dados do dashboard
+      console.log('Mudança nos caixas detectada!', payload);
+      loadDashboardData(); 
+    };
+
+    // 3. Assina o canal de "realtime" do Supabase
+    const channel = supabase
+      .channel('dashboard-caixas-changes') // um nome único para o canal
+      .on(
+        'postgres_changes', // tipo de evento
+        { event: '*', schema: 'public', table: 'caixas' }, // escuta TUDO na tabela 'caixas'
+        handleCaixaChange // chama nossa função quando algo mudar
+      )
+      .subscribe(); // Inicia a assinatura
+
+    // 4. Limpeza: Quando o componente for "desmontado" (usuário sair da página),
+    //    remove a assinatura para economizar recursos.
+    return () => {
+      supabase.removeChannel(channel);
+    };
+
+  }, []); // O array vazio aqui está correto, pois a assinatura só precisa ser feita uma vez
 
   const loadDashboardData = async () => {
     setLoading(true);
@@ -110,7 +136,7 @@ export default function AdminDashboard() {
           .from("sales")
           .select("id", { count: "exact" })
           .eq("status", "aberta"),
-        supabase
+        supabase // Esta consulta agora será atualizada em tempo real
           .from("caixas")
           .select("id", { count: "exact" })
           .eq("status", "aberto"),
@@ -212,6 +238,7 @@ export default function AdminDashboard() {
           </CardContent>
         </Card>
 
+        {/* Este Card agora vai atualizar automaticamente */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">
@@ -220,7 +247,7 @@ export default function AdminDashboard() {
             <Wallet className="h-4 w-4 text-primary" />
           </CardHeader>
           <CardContent>
-            {loading ? (
+            {loading && kpiStats.caixasAbertos === 0 ? ( // Ajuste no loading
               <div className="text-2xl font-bold">-</div>
             ) : kpiStats.caixasAbertos > 0 ? (
               <>
@@ -229,11 +256,9 @@ export default function AdminDashboard() {
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
                   </span>
-                  {/* ALTERAÇÃO AQUI: Substituído kpiStats.caixasAbertos por "Aberto" */}
                   Aberto
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  {/* Você pode ajustar este texto se quiser também */}
                   {kpiStats.caixasAbertos} Caixa(s) aberto(s) agora
                 </p>
               </>
